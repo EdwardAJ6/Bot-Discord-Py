@@ -1,9 +1,15 @@
 import logging
+import os
+import threading
 
 import discord
 import requests
+import spotipy
 from discord.ext import commands
+from dotenv import load_dotenv
+from spotipy.oauth2 import SpotifyOAuth
 
+from fastapi_app.app import run_fastapi
 from play_music.bot_music import (
     bot_discord,
     ensure_voice,
@@ -14,8 +20,10 @@ from play_music.bot_music import (
     queues,
     voice_clients,
 )
+from variables import SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SPOTIPY_REDIRECT_URI, TOKEN_DISCORD, user_tokens
 
 STATUS_URL = "http://localhost:8000/current-status"  # URL del endpoint de consulta de estado
+load_dotenv()
 
 
 # Comando 'hola'
@@ -171,11 +179,76 @@ async def clear_queue(ctx):
         await ctx.send("La cola ya está vacía.")
 
 
-import os
+@bot_discord.command(name="recomendar")
+async def recomendar(ctx, tipo: str = "cancion"):
+    """
+    Comando para recomendar canciones o artistas.
+    """
+    user_id = ctx.author.id
+    token_info = user_tokens.get(str(user_id))
 
-TOKEN_DISCORD = os.getenv("TOKEN_DISCORD")
-if not TOKEN_DISCORD:
-    raise ValueError("La variable de entorno DISCORD_TOKEN debe estar configurada.")
+    if not token_info:
+        await ctx.send("Necesitas autenticarte primero usando el comando >login.")
+        return
+
+    sp = spotipy.Spotify(auth=token_info["access_token"])
+
+    try:
+        if tipo == "cancion":
+            top_tracks = sp.current_user_top_tracks(limit=1)
+            if top_tracks["items"]:
+                track = top_tracks["items"][0]
+                embed = discord.Embed(
+                    title="🎶 Canción Recomendada",
+                    description=f"Te recomiendo escuchar **{track['name']}** de **{track['artists'][0]['name']}**.",
+                    color=discord.Color.green(),
+                )
+                embed.add_field(name="Escuchar en Spotify", value=track["external_urls"]["spotify"], inline=False)
+                embed.set_image(url=track["album"]["images"][1]["url"])  # Imagen del álbum
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("No pude encontrar recomendaciones de canciones para ti.")
+
+        elif tipo == "artista":
+            top_artists = sp.current_user_top_artists(limit=1)
+            if top_artists["items"]:
+                artist = top_artists["items"][0]
+                embed = discord.Embed(
+                    title="🎤 Artista Recomendado",
+                    description=f"Te recomiendo el artista **{artist['name']}**. ¡Es uno de tus favoritos!",
+                    color=discord.Color.blue(),
+                )
+                embed.add_field(name="Escuchar en Spotify", value=artist["external_urls"]["spotify"], inline=False)
+                embed.set_image(url=artist["images"][1]["url"])  # Imagen del artista
+
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("No pude encontrar recomendaciones de artistas para ti.")
+        else:
+            await ctx.send("Especifica `cancion` o `artista` para recibir una recomendación.")
+
+    except Exception as e:
+        await ctx.send("Ocurrió un error al obtener las recomendaciones.")
+        print(e)
+
+
+@bot_discord.command(name="login")
+async def login(ctx):
+    """
+    Inicia el proceso de autenticación de Spotify.
+    """
+    sp_oauth = SpotifyOAuth(
+        client_id=SPOTIPY_CLIENT_ID,
+        client_secret=SPOTIPY_CLIENT_SECRET,
+        redirect_uri=SPOTIPY_REDIRECT_URI,
+        scope="user-top-read",
+    )
+    auth_url = sp_oauth.get_authorize_url(state=str(ctx.author.id))
+    await ctx.send(f"Por favor, autentícate usando este enlace: {auth_url}")
+
 
 if __name__ == "__main__":
+    fastapi_thread = threading.Thread(target=run_fastapi)
+    fastapi_thread.start()
+
     bot_discord.run(TOKEN_DISCORD)

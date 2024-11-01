@@ -26,3 +26,10 @@ if not SPOTIPY_CLIENT_ID or not SPOTIPY_CLIENT_SECRET:
 client_spotipy = spotipy.Spotify(
     auth_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET)
 )
+
+TOKEN_DISCORD = os.getenv("TOKEN_DISCORD")
+if not TOKEN_DISCORD:
+    raise ValueError("La variable de entorno DISCORD_TOKEN debe estar configurada.")
+
+user_tokens = {}
+SPOTIPY_REDIRECT_URI = "http://localhost:8001/callback"

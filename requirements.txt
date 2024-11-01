@@ -4,3 +4,5 @@ spotipy
 yt_dlp
 pynacl
 python-dotenv
+fastapi
+uvicorn
