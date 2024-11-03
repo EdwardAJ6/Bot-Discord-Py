@@ -9,7 +9,7 @@ import discord
 import yt_dlp
 from discord.ext import commands
 
-from variables import bot_discord, client_spotipy, loop_flags, loop_song, queues, voice_clients
+from commons.config import bot_discord, client_spotipy, loop_flags, loop_song, queues, voice_clients
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)

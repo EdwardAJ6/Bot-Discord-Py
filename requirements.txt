@@ -6,3 +6,6 @@ pynacl
 python-dotenv
 fastapi
 uvicorn
+motor
+pandas
+scikit-learn

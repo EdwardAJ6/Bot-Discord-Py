@@ -9,18 +9,12 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from spotipy.oauth2 import SpotifyOAuth
 
+from commons.config import Config, bot_discord, loop_flags, queues, user_tokens, voice_clients
+from commons.db import MongoDB
 from fastapi_app.app import run_fastapi
-from play_music.bot_music import (
-    bot_discord,
-    ensure_voice,
-    format_duration,
-    handle_spotify_playlist,
-    handle_youtube,
-    loop_flags,
-    queues,
-    voice_clients,
-)
-from variables import SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SPOTIPY_REDIRECT_URI, TOKEN_DISCORD, user_tokens
+from machine_learning.process import df_scaled, knn, recomienda_canciones_por_perfil
+from play_music.bot_music import ensure_voice, format_duration, handle_spotify_playlist, handle_youtube
+from spotify_operations.recommendation import spotipy_recomendar
 
 STATUS_URL = "http://localhost:8000/current-status"  # URL del endpoint de consulta de estado
 load_dotenv()
@@ -181,55 +175,79 @@ async def clear_queue(ctx):
 
 @bot_discord.command(name="recomendar")
 async def recomendar(ctx, tipo: str = "cancion"):
-    """
-    Comando para recomendar canciones o artistas.
-    """
     user_id = ctx.author.id
-    token_info = user_tokens.get(str(user_id))
+    mongo = MongoDB("bot_spotipy")
+    user_data = await mongo.find_document({"user_id": str(user_id)}, "users")
+    sp_oauth = SpotifyOAuth(
+        client_id=Config.SPOTIPY_CLIENT_ID,
+        client_secret=Config.SPOTIPY_CLIENT_SECRET,
+        redirect_uri=Config.SPOTIPY_REDIRECT_URI,
+    )
+    token_info = sp_oauth.validate_token(user_data["token_info"])
+    user_data["token_info"] = token_info
+    user_data = await mongo.update_document("users", {"user_id": str(user_id)}, update={"$set": user_data})
+    sp = spotipy.Spotify(auth=user_data["token_info"]["access_token"])
 
-    if not token_info:
-        await ctx.send("Necesitas autenticarte primero usando el comando >login.")
-        return
+    if user_data and "top_tracks" in user_data:
+        # Obtén las canciones y artistas favoritos
+        top_tracks = user_data["top_tracks"]  # Asegúrate que esto contenga IDs de Spotify
+        listened_tracks = user_data.get("listened_tracks", [])  # Lista de canciones que el usuario ha escuchado
 
-    sp = spotipy.Spotify(auth=token_info["access_token"])
+        # Obtiene información de las canciones favoritas
+        seed_tracks = []
+        seed_artists = set()
+        seed_genres = set()  # Esto será un conjunto para evitar duplicados
 
-    try:
-        if tipo == "cancion":
-            top_tracks = sp.current_user_top_tracks(limit=1)
-            if top_tracks["items"]:
-                track = top_tracks["items"][0]
-                embed = discord.Embed(
-                    title="🎶 Canción Recomendada",
-                    description=f"Te recomiendo escuchar **{track['name']}** de **{track['artists'][0]['name']}**.",
-                    color=discord.Color.green(),
-                )
-                embed.add_field(name="Escuchar en Spotify", value=track["external_urls"]["spotify"], inline=False)
-                embed.set_image(url=track["album"]["images"][1]["url"])  # Imagen del álbum
-                await ctx.send(embed=embed)
-            else:
-                await ctx.send("No pude encontrar recomendaciones de canciones para ti.")
+        for track_id in top_tracks:
+            track_info = sp.track(track_id)
+            # seed_tracks.append(track_id)  # ID de la canción
+            seed_artists.add(track_info["artists"][0]["id"])  # Asumiendo que tomas el primer artista
+            # Aquí puedes agregar lógica para obtener géneros, si es necesario
+            # Ejemplo: seed_genres.update(track_info["genres"]) (esto requeriría información de géneros)
 
-        elif tipo == "artista":
-            top_artists = sp.current_user_top_artists(limit=1)
-            if top_artists["items"]:
-                artist = top_artists["items"][0]
-                embed = discord.Embed(
-                    title="🎤 Artista Recomendado",
-                    description=f"Te recomiendo el artista **{artist['name']}**. ¡Es uno de tus favoritos!",
-                    color=discord.Color.blue(),
-                )
-                embed.add_field(name="Escuchar en Spotify", value=artist["external_urls"]["spotify"], inline=False)
-                embed.set_image(url=artist["images"][1]["url"])  # Imagen del artista
+        # Llama a la función de recomendaciones de Spotipy
+        try:
+            recommendations = sp.recommendations(
+                seed_tracks=seed_tracks,
+                seed_artists=list(seed_artists)[:5],  # Convertir a lista
+                seed_genres=list(seed_genres)[:5],  # Convertir a lista (vacío por ahora)
+                limit=10,  # Ajusta el límite según sea necesario
+            )
+        except Exception as e:
+            print(f"Error al obtener recomendaciones: {e}")
+            await ctx.send("Hubo un error al obtener las recomendaciones.")
+            return
+            # Extrae el nombre y el ID de las canciones recomendadas
+            # Obtener las canciones recomendadas junto con su ID y URL de imagen
+        recommended_tracks = [
+            (track["name"], track["id"], track["album"]["images"][0]["url"]) for track in recommendations["tracks"]
+        ]
 
-                await ctx.send(embed=embed)
-            else:
-                await ctx.send("No pude encontrar recomendaciones de artistas para ti.")
-        else:
-            await ctx.send("Especifica `cancion` o `artista` para recibir una recomendación.")
+        # Filtrar las recomendaciones para excluir las que el usuario ya ha escuchado
+        filtered_recommendations = [
+            (name, track_id, img_url)
+            for name, track_id, img_url in recommended_tracks
+            if track_id not in listened_tracks
+        ]
 
-    except Exception as e:
-        await ctx.send("Ocurrió un error al obtener las recomendaciones.")
-        print(e)
+        # Si no hay recomendaciones filtradas, avisa al usuario
+        if not filtered_recommendations:
+            await ctx.send("No hay canciones recomendadas que no hayas escuchado.")
+            return
+
+        # Crear un embed para las recomendaciones
+        embed = discord.Embed(title="Recomendaciones Musicales", color=discord.Color.blue())
+
+        # Añadir las canciones recomendadas al embed con imágenes
+        for name, track_id, img_url in filtered_recommendations:
+            embed.add_field(name=name, value=f"[Escuchar](https://open.spotify.com/track/{track_id})", inline=False)
+            embed.set_thumbnail(url=img_url)
+
+        # Enviar el embed
+        await ctx.send(embed=embed)
+
+    else:
+        await ctx.send("No se encontraron datos suficientes para recomendar.")
 
 
 @bot_discord.command(name="login")
@@ -238,17 +256,51 @@ async def login(ctx):
     Inicia el proceso de autenticación de Spotify.
     """
     sp_oauth = SpotifyOAuth(
-        client_id=SPOTIPY_CLIENT_ID,
-        client_secret=SPOTIPY_CLIENT_SECRET,
-        redirect_uri=SPOTIPY_REDIRECT_URI,
+        client_id=Config.SPOTIPY_CLIENT_ID,
+        client_secret=Config.SPOTIPY_CLIENT_SECRET,
+        redirect_uri=Config.SPOTIPY_REDIRECT_URI,
         scope="user-top-read",
     )
+    try:
+        if not Config.DEBUG:
+            response = requests.get("http://127.0.0.1:4040/api/tunnels")
+            response_data = response.json()
+    except Exception as e:
+        await ctx.send("Servicio de login inactivo, contacte al administrator")
+        return
+
     auth_url = sp_oauth.get_authorize_url(state=str(ctx.author.id))
     await ctx.send(f"Por favor, autentícate usando este enlace: {auth_url}")
 
 
+@bot_discord.command(name="mis-preferencias")
+async def mis_preferencias(ctx):
+    user_id = str(ctx.author.id)
+
+    # Verifica que el usuario esté autenticado
+    if user_id not in user_tokens:
+        await ctx.send("Por favor, inicia sesión primero usando el comando `>login`.")
+        return
+
+    # Obtén el token de acceso y configura el cliente de Spotify
+    token_info = user_tokens[user_id]
+    sp = spotipy.Spotify(auth=token_info["access_token"])
+
+    # Obtén las canciones o artistas favoritos
+    top_tracks = sp.current_user_top_tracks(limit=10)  # puedes ajustar el límite según prefieras
+    top_artists = sp.current_user_top_artists(limit=10)
+
+    # Muestra la lista de canciones y artistas favoritos
+    track_names = [track["name"] for track in top_tracks["items"]]
+    artist_names = [artist["name"] for artist in top_artists["items"]]
+
+    await ctx.send(f"**Tus canciones favoritas:** {', '.join(track_names)}")
+    await ctx.send(f"**Tus artistas favoritos:** {', '.join(artist_names)}")
+
+
 if __name__ == "__main__":
+    print("fast api up")
     fastapi_thread = threading.Thread(target=run_fastapi)
     fastapi_thread.start()
 
-    bot_discord.run(TOKEN_DISCORD)
+    bot_discord.run(Config.TOKEN_DISCORD)
