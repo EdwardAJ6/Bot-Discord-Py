@@ -1,6 +1,7 @@
+import asyncio
 import logging
-import os
 import threading
+from datetime import datetime, timedelta
 
 import discord
 import requests
@@ -12,9 +13,7 @@ from spotipy.oauth2 import SpotifyOAuth
 from commons.config import Config, bot_discord, loop_flags, queues, user_tokens, voice_clients
 from commons.db import MongoDB
 from fastapi_app.app import run_fastapi
-from machine_learning.process import df_scaled, knn, recomienda_canciones_por_perfil
 from play_music.bot_music import ensure_voice, format_duration, handle_spotify_playlist, handle_youtube
-from spotify_operations.recommendation import spotipy_recomendar
 
 STATUS_URL = "http://localhost:8000/current-status"  # URL del endpoint de consulta de estado
 load_dotenv()
@@ -296,6 +295,69 @@ async def mis_preferencias(ctx):
 
     await ctx.send(f"**Tus canciones favoritas:** {', '.join(track_names)}")
     await ctx.send(f"**Tus artistas favoritos:** {', '.join(artist_names)}")
+
+
+def calcular_tiempo_mejora(duracion_mejora, duracion_potenciador):
+    try:
+        # Potenciador 10x
+        minutos_potenciador = duracion_potenciador.total_seconds() / 60
+        avance_potenciador = minutos_potenciador * 10
+
+        # Duración de la mejora en minutos
+        minutos_mejora = duracion_mejora.total_seconds() / 60
+
+        # Calcular el tiempo restante
+        if avance_potenciador >= minutos_mejora:
+            return timedelta(0)
+        else:
+            minutos_restantes = minutos_mejora - avance_potenciador
+            return timedelta(minutes=minutos_restantes)
+    except:
+        raise Exception("Error en el formato de fechas, ejemplo: 12:00 12:00 Casa")
+
+
+mejoras_en_proceso = {}
+
+
+@bot_discord.command(name="mejora_coc")
+async def mejora(ctx, duracion_mejora: str, duracion_potenciador: str, nombre_estructura: str):
+    try:
+        # Parsear las duraciones
+        horas_mejora, minutos_mejora = map(int, duracion_mejora.split(":"))
+        horas_potenciador, minutos_potenciador = map(int, duracion_potenciador.split(":"))
+
+        # Crear timedelta
+        duracion_mejora_td = timedelta(hours=horas_mejora, minutes=minutos_mejora)
+        duracion_potenciador_td = timedelta(hours=horas_potenciador, minutes=minutos_potenciador)
+
+        # Calcular el tiempo total
+        tiempo_total = calcular_tiempo_mejora(duracion_mejora_td, duracion_potenciador_td)
+        tiempo_finalizacion = datetime.now() + tiempo_total
+
+        # Guardar la mejora en curso
+        ##TODO Guarda en base de datos
+        mejoras_en_proceso[ctx.author.id] = {
+            "canal_id": ctx.channel.id,
+            "usuario_id": ctx.author.id,
+            "nombre_estructura": nombre_estructura,
+            "tiempo_finalizacion": tiempo_finalizacion,
+        }
+
+        horas, minutos = divmod(tiempo_total.total_seconds() // 60, 60)
+        await ctx.send(f"La mejora '{nombre_estructura}' estará lista en: {int(horas)} horas y {int(minutos)} minutos")
+
+        # Iniciar la tarea de notificación
+        await notificar_mejora(ctx.channel, ctx.author, nombre_estructura, tiempo_total)
+
+    except Exception as e:
+        await ctx.send(f"Error al calcular la mejora: {e}")
+
+
+# Función para notificar cuando la mejora termina
+async def notificar_mejora(canal, usuario, nombre_estructura, tiempo_espera):
+    # Esperar el tiempo de la mejora
+    await asyncio.sleep(tiempo_espera.total_seconds())
+    await canal.send(f"🚀 {usuario.mention}, la mejora '{nombre_estructura}' ha terminado.")
 
 
 if __name__ == "__main__":
