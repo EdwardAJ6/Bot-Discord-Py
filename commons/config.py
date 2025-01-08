@@ -26,6 +26,7 @@ class Config(object):
     MONGODB_PORT = os.getenv("MONGODB_PORT")
     SPOTIPY_REDIRECT_URI = SPOTIPY_REDIRECT_URI_DEV if DEBUG else SPOTIPY_REDIRECT_URI_PROD
     FAST_API_PORT = 8002 if DEBUG else 8001
+    ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 
 queues = {}

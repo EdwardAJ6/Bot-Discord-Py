@@ -6,14 +6,13 @@ from datetime import datetime, timedelta
 import discord
 import requests
 import spotipy
-from discord.ext import commands
-from dotenv import load_dotenv
-from spotipy.oauth2 import SpotifyOAuth
-
 from commons.config import Config, bot_discord, loop_flags, queues, user_tokens, voice_clients
 from commons.db import MongoDB
+from discord.ext import commands
+from dotenv import load_dotenv
 from fastapi_app.app import run_fastapi
 from play_music.bot_music import ensure_voice, format_duration, handle_spotify_playlist, handle_youtube
+from spotipy.oauth2 import SpotifyOAuth
 
 STATUS_URL = "http://localhost:8000/current-status"  # URL del endpoint de consulta de estado
 load_dotenv()
@@ -316,38 +315,54 @@ def calcular_tiempo_mejora(duracion_mejora, duracion_potenciador):
         raise Exception("Error en el formato de fechas, ejemplo: 12:00 12:00 Casa")
 
 
-mejoras_en_proceso = {}
+mejoras_activas = {}
 
 
 @bot_discord.command(name="mejora_coc")
-async def mejora(ctx, duracion_mejora: str, duracion_potenciador: str, nombre_estructura: str):
+async def mejora(ctx, tiempo_mejora: str, tiempo_potenciador: str, nombre_estructura: str):
     try:
-        # Parsear las duraciones
-        horas_mejora, minutos_mejora = map(int, duracion_mejora.split(":"))
-        horas_potenciador, minutos_potenciador = map(int, duracion_potenciador.split(":"))
+        usuario = ctx.author
+        canal = ctx.channel
 
-        # Crear timedelta
-        duracion_mejora_td = timedelta(hours=horas_mejora, minutes=minutos_mejora)
-        duracion_potenciador_td = timedelta(hours=horas_potenciador, minutes=minutos_potenciador)
+        # Parsear los tiempos
+        tiempo_mejora_td = timedelta(hours=int(tiempo_mejora.split(":")[0]), minutes=int(tiempo_mejora.split(":")[1]))
+        tiempo_potenciador_td = timedelta(
+            hours=int(tiempo_potenciador.split(":")[0]), minutes=int(tiempo_potenciador.split(":")[1])
+        )
 
-        # Calcular el tiempo total
-        tiempo_total = calcular_tiempo_mejora(duracion_mejora_td, duracion_potenciador_td)
-        tiempo_finalizacion = datetime.now() + tiempo_total
+        # Verificar si el potenciador dura más que el tiempo total de mejora
+        if tiempo_potenciador_td >= tiempo_mejora_td:
+            # Todo el tiempo de mejora estará potenciado
+            tiempo_efectivo = tiempo_mejora_td / 10
+        else:
+            # Calcular el tiempo efectivo con el potenciador
+            tiempo_reducido_con_potenciador = tiempo_potenciador_td * 10  # El potenciador multiplica el tiempo por 10.
 
-        # Guardar la mejora en curso
-        ##TODO Guarda en base de datos
-        mejoras_en_proceso[ctx.author.id] = {
-            "canal_id": ctx.channel.id,
-            "usuario_id": ctx.author.id,
-            "nombre_estructura": nombre_estructura,
-            "tiempo_finalizacion": tiempo_finalizacion,
+            # Calcular el tiempo restante sin potenciador
+            tiempo_restante_sin_potenciador = tiempo_mejora_td - tiempo_reducido_con_potenciador
+
+            # Sumar ambos tiempos para obtener el tiempo efectivo total
+            tiempo_efectivo = tiempo_potenciador_td + tiempo_restante_sin_potenciador
+
+        # Calcular la hora de finalización
+        hora_finalizacion = datetime.now() + tiempo_efectivo
+
+        # Guardar la mejora en el diccionario
+        mejoras_activas[nombre_estructura] = {
+            "usuario": usuario,
+            "hora_finalizacion": hora_finalizacion,
+            "nombre": nombre_estructura,
         }
 
-        horas, minutos = divmod(tiempo_total.total_seconds() // 60, 60)
-        await ctx.send(f"La mejora '{nombre_estructura}' estará lista en: {int(horas)} horas y {int(minutos)} minutos")
+        # Enviar mensaje al usuario
+        # Convertir tiempo efectivo a horas y minutos
+        horas = int(tiempo_efectivo.total_seconds() // 3600)
+        minutos = int((tiempo_efectivo.total_seconds() % 3600) // 60)
 
-        # Iniciar la tarea de notificación
-        await notificar_mejora(ctx.channel, ctx.author, nombre_estructura, tiempo_total)
+        await ctx.send(f"La mejora '{nombre_estructura}' estará lista en: {horas} horas y {minutos} minutos.")
+
+        # Notificar al usuario cuando termine la mejora
+        await notificar_mejora(canal, usuario, nombre_estructura, tiempo_efectivo)
 
     except Exception as e:
         await ctx.send(f"Error al calcular la mejora: {e}")
@@ -358,6 +373,94 @@ async def notificar_mejora(canal, usuario, nombre_estructura, tiempo_espera):
     # Esperar el tiempo de la mejora
     await asyncio.sleep(tiempo_espera.total_seconds())
     await canal.send(f"🚀 {usuario.mention}, la mejora '{nombre_estructura}' ha terminado.")
+    mejoras_activas.pop(nombre_estructura)
+
+
+@bot_discord.command(name="tiempo_faltante")
+async def tiempo_faltante(ctx):
+    usuario = ctx.author
+    mejoras_usuario = {k: v for k, v in mejoras_activas.items() if v["usuario"] == usuario}
+
+    if not mejoras_usuario:
+        await ctx.send("No tienes mejoras activas.")
+        return
+
+    # Crear menú interactivo
+    opciones = "\n".join([f"{i+1}- {mejora}" for i, mejora in enumerate(mejoras_usuario.keys())])
+    opciones += "\nall - Mostrar todas"
+
+    await ctx.send(f"Selecciona una opción:\n{opciones}")
+
+    def check(msg):
+        return msg.author == usuario and msg.content.isdigit() or msg.content.lower() == "all"
+
+    try:
+        respuesta = await bot_discord.wait_for("message", check=check, timeout=30)
+    except asyncio.TimeoutError:
+        await ctx.send("Se agotó el tiempo de espera.")
+        return
+
+    if respuesta.content.lower() == "all":
+        mensaje = ""
+        for nombre, datos in mejoras_usuario.items():
+            tiempo_restante = datos["hora_finalizacion"] - datetime.now()
+            minutos, segundos = divmod(int(tiempo_restante.total_seconds()), 60)
+            mensaje += f"⏳ **{nombre}**: {minutos} minutos y {segundos} segundos restantes.\n"
+        await ctx.send(mensaje)
+
+    else:
+        indice = int(respuesta.content) - 1
+        if indice < 0 or indice >= len(mejoras_usuario):
+            await ctx.send("Opción inválida.")
+            return
+
+        nombre_seleccionado = list(mejoras_usuario.keys())[indice]
+        datos_seleccionados = mejoras_usuario[nombre_seleccionado]
+        tiempo_restante = datos_seleccionados["hora_finalizacion"] - datetime.now()
+
+        await ctx.send(f"⏳ Tiempo restante para '{nombre_seleccionado}': {tiempo_restante}")
+
+
+@bot_discord.command(name="shutdown_notice")
+async def shutdown_notice(ctx, minutos: int = 15):
+    """
+    Envía un mensaje de aviso de cierre a todos los servidores donde está el bot.
+    """
+    message_content = f"⚠️ El bot se apgagara en {minutos} minutos."
+    author = ctx.author.id
+    delete_delay = 300  # 5 minutos en segundos
+    notified_servers = 0
+
+    if author != Config.ADMIN_ID:
+        await ctx.send("No tienes permisos para ejecutar este comando.")
+        return
+
+    for guild in bot_discord.guilds:
+        # if guild.id != 971889659468722288: # Server de pruebas
+        #     continue
+        for channel in guild.text_channels:
+            if channel.permissions_for(guild.me).send_messages:
+                try:
+                    message = await channel.send(message_content)
+                    notified_servers += 1
+                    # Programa la eliminación del mensaje después de 10 minutos
+                    asyncio.create_task(delete_message_later(message, delete_delay))
+
+                except Exception as e:
+                    print(f"Error al enviar mensaje a {guild.name}: {e}")
+                break  # Solo envía al primer canal encontrado con permisos
+    await ctx.send(f"Mensaje de cierre enviado a ", "-".join([sv.name for sv in bot_discord.guilds]), " servidores.")
+
+
+async def delete_message_later(message, delay):
+    """
+    Espera un tiempo específico antes de eliminar un mensaje.
+    """
+    try:
+        await asyncio.sleep(delay)
+        await message.delete()
+    except Exception as e:
+        print(f"Error al eliminar el mensaje en {message.channel.guild.name}: {e}")
 
 
 if __name__ == "__main__":
