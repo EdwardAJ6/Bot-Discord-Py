@@ -9,14 +9,21 @@ import discord
 import yt_dlp
 from discord.ext import commands
 
-from commons.config import bot_discord, client_spotipy, loop_flags, loop_song, queues, voice_clients
+from commons.config import (
+    bot_discord,
+    client_spotipy,
+    loop_flags,
+    loop_song,
+    queues,
+    voice_clients,
+)
 
 # Configuración de logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 # Configuración de yt_dlp y ffmpeg
-yt_dl_options = {"format": "bestaudio/best"}
+yt_dl_options = {"format": "bestaudio/best","noplaylist": True,}
 ytdl = yt_dlp.YoutubeDL(yt_dl_options)
 ffmpeg_options = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
@@ -24,23 +31,29 @@ ffmpeg_options = {
 }
 
 
-# Función para asegurar conexión al canal de voz
 async def ensure_voice(ctx):
-    guild_id = ctx.guild.id
-    voice_client = ctx.voice_client
+    try:
+        channel = ctx.author.voice.channel
+        perms = channel.permissions_for(ctx.guild.me)
+        if not perms.connect or not perms.speak:
+            await ctx.send("No tengo permisos para unirme o hablar en tu canal de voz.")
+            return
 
-    if voice_client is None or not voice_client.is_connected():
-        if ctx.author.voice:
-            channel = ctx.author.voice.channel
+        if ctx.voice_client and not ctx.voice_client.is_connected():
+            await ctx.voice_client.disconnect(force=True)
+
+        try:
             voice_client = await channel.connect()
-            voice_clients[guild_id] = voice_client
-        else:
-            await ctx.send("¡Tienes que estar en un canal de voz para reproducir música!")
-            raise commands.CommandError("Autor no conectado a un canal de voz.")
-    else:
-        voice_client = voice_clients[guild_id]
-    return voice_client
+            return voice_client
+        except asyncio.TimeoutError as e:
+            await ctx.send("❌ No se pudo conectar al canal de voz: tiempo de espera agotado.")
+            raise e  
 
+    except AttributeError:
+        await ctx.send("¡Debes estar en un canal de voz para usar este comando!")
+    except Exception as e:
+        logging.exception("Error inesperado al conectar al canal de voz")
+        await ctx.send(f"Error al conectar: {e}")
 
 # Función para manejar playlists de Spotify
 async def handle_spotify_playlist(ctx, playlist_url, voice_client, is_loop):
@@ -56,7 +69,9 @@ async def handle_spotify_playlist(ctx, playlist_url, voice_client, is_loop):
             queues[guild_id] = []
 
         for track_info in tracks:
-            query_string = f"{track_info['artist']} - {track_info['title']} audio oficial"
+            query_string = (
+                f"{track_info['artist']} - {track_info['title']} audio oficial"
+            )
             youtube_link = await search_youtube(query_string)
             if youtube_link:
                 data = await ytdl_extract_info(youtube_link)
@@ -82,7 +97,10 @@ async def handle_spotify_playlist(ctx, playlist_url, voice_client, is_loop):
             color=discord.Color.blue(),
         )
         embed.set_thumbnail(url=tracks_info.get("image"))
-        await ctx.send(f"Se añadieron {tracks_info['total_tracks']} canciones de la playlist a la cola.", embed=embed)
+        await ctx.send(
+            f"Se añadieron {tracks_info['total_tracks']} canciones de la playlist a la cola.",
+            embed=embed,
+        )
 
     except Exception as e:
         logging.exception("Error al manejar la playlist de Spotify")
@@ -92,7 +110,9 @@ async def handle_spotify_playlist(ctx, playlist_url, voice_client, is_loop):
 # Función para extraer información con yt_dlp
 async def ytdl_extract_info(url):
     loop = asyncio.get_event_loop()
-    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+    data = await loop.run_in_executor(
+        None, lambda: ytdl.extract_info(url, download=False)
+    )
     return data
 
 
@@ -127,7 +147,10 @@ async def handle_youtube(ctx, query, voice_client, is_loop):
                 queues[guild_id] = []
 
             # Verificar si la canción ya está en la cola
-            if any(song["youtube_url"] == song_info["youtube_url"] for song in queues[guild_id]):
+            if any(
+                song["youtube_url"] == song_info["youtube_url"]
+                for song in queues[guild_id]
+            ):
                 await ctx.send("La canción ya está en la cola.")
                 return
 
@@ -139,8 +162,16 @@ async def handle_youtube(ctx, query, voice_client, is_loop):
                 color=discord.Color.green(),
             )
             embed.set_thumbnail(url=song_info["thumbnail"])
-            embed.add_field(name="Duración", value=format_duration(song_info["duration"]), inline=True)
-            embed.add_field(name="En cola", value=f"{len(queues.get(guild_id, []))} canciones", inline=True)
+            embed.add_field(
+                name="Duración",
+                value=format_duration(song_info["duration"]),
+                inline=True,
+            )
+            embed.add_field(
+                name="En cola",
+                value=f"{len(queues.get(guild_id, []))} canciones",
+                inline=True,
+            )
             embed.set_footer(text=f"Pedida por {ctx.author.display_name}")
             await ctx.send(embed=embed)
         else:
@@ -173,8 +204,11 @@ async def play_song(ctx, song_info, voice_client, is_loop):
             asyncio.run_coroutine_threadsafe(coro, bot_discord.loop)
 
     # Reproducir la canción
-    player = discord.FFmpegOpusAudio(song_info["song_url"], **ffmpeg_options)
-    voice_client.play(player, after=after_playing)
+    try:
+        player = discord.FFmpegOpusAudio(song_info["song_url"], **ffmpeg_options)
+        voice_client.play(player, after=after_playing)
+    except Exception as e:
+        logging.exception("Error al reproducir la canción")
 
     # Enviar un embed
     embed = discord.Embed(
@@ -183,8 +217,12 @@ async def play_song(ctx, song_info, voice_client, is_loop):
         color=discord.Color.blue(),
     )
     embed.set_thumbnail(url=song_info["thumbnail"])
-    embed.add_field(name="Duración", value=format_duration(song_info["duration"]), inline=True)
-    embed.add_field(name="En cola", value=f"{len(queues.get(guild_id, []))} canciones", inline=True)
+    embed.add_field(
+        name="Duración", value=format_duration(song_info["duration"]), inline=True
+    )
+    embed.add_field(
+        name="En cola", value=f"{len(queues.get(guild_id, []))} canciones", inline=True
+    )
     embed.set_footer(text=f"Pedida por {ctx.author.display_name}")
     await ctx.send(embed=embed)
 
@@ -217,7 +255,9 @@ def format_duration(duration):
 async def search_youtube(query):
     query_string = urllib.parse.urlencode({"search_query": query})
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"https://www.youtube.com/results?{query_string}") as response:
+        async with session.get(
+            f"https://www.youtube.com/results?{query_string}"
+        ) as response:
             if response.status == 200:
                 html = await response.text()
                 search_results = re.findall(r"/watch\?v=(.{11})", html)

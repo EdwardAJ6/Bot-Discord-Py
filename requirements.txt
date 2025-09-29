@@ -1,4 +1,4 @@
-discord.py
+# discord.py
 requests
 spotipy
 yt_dlp

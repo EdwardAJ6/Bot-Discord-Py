@@ -1,0 +1,31 @@
+# Usa una imagen base oficial de Python
+FROM python:3.11-slim
+
+# Establece el directorio de trabajo
+WORKDIR /app
+
+# Instala dependencias del sistema necesarias
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copia los archivos de dependencias
+COPY Bot-Discord-Py/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY discord.py .
+RUN python setup.py install
+
+
+# Instala las dependencias de Python
+
+# Copia el resto del código de la app
+COPY Bot-Discord-Py .
+
+# Expone el puerto del FastAPI si es necesario
+EXPOSE 8000
+
+# Comando para iniciar el bot
+CMD ["python", "bot.py"]

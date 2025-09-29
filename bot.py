@@ -17,6 +17,30 @@ from spotipy.oauth2 import SpotifyOAuth
 STATUS_URL = "http://localhost:8000/current-status"  # URL del endpoint de consulta de estado
 load_dotenv()
 
+@bot_discord.command(name="check_voice_perms")
+async def check_voice_perms(ctx):
+    perms = ctx.author.voice.channel.permissions_for(ctx.guild.me)
+    await ctx.send(
+        f"Conectar: {perms.connect}, Hablar: {perms.speak}, Actividad: {perms.use_voice_activation}"
+    )
+
+@bot_discord.command(name="unete")
+async def unete(ctx):
+    if ctx.author.voice:
+        canal = ctx.author.voice.channel
+
+        # Desconecta si ya está en uno
+        if ctx.voice_client is not None:
+            await ctx.voice_client.disconnect()
+
+        try:
+            await canal.connect()
+            await ctx.send(f"Me uní a {canal.name}")
+        except asyncio.TimeoutError:
+            await ctx.send("❌ No me pude conectar al canal de voz (Timeout). Revisa permisos o red.")
+    else:
+        await ctx.send("❗ Debes estar en un canal de voz para que pueda unirme.")
+
 
 # Comando 'hola'
 @bot_discord.command(name="hola")
@@ -464,8 +488,8 @@ async def delete_message_later(message, delay):
 
 
 if __name__ == "__main__":
-    print("fast api up")
-    fastapi_thread = threading.Thread(target=run_fastapi)
-    fastapi_thread.start()
+    # print("fast api up")
+    # fastapi_thread = threading.Thread(target=run_fastapi)
+    # fastapi_thread.start()
 
     bot_discord.run(Config.TOKEN_DISCORD)
